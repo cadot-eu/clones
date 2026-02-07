@@ -1,0 +1,84 @@
+#!/bin/bash
+
+YAML_FILE="${1:-users.yaml}"
+TOKEN_FILE="${2:-.github_token}"
+
+GITHUB_TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || echo "$GITHUB_TOKEN")
+
+users=$(cat "$YAML_FILE" | grep -v "^users:" | grep "^  - " | sed 's/^  - //' | sed 's/ //g')
+
+echo "🚀 Démarrage de la récupération des statistiques GitHub..."
+echo "=========================================================="
+echo ""
+
+while IFS= read -r username; do
+    [[ -z "$username" ]] && continue
+    
+    echo ""
+    echo "👤 Traitement de l'utilisateur: $username"
+    echo "─────────────────────────────────────────────"
+    
+    temp=$(mktemp)
+    repo_count=0
+    
+    echo "📡 Étape 1: Récupération des repositories publics..."
+    repos_data=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+        "https://api.github.com/users/$username/repos?per_page=100&type=public")
+    
+    total_repos=$(echo "$repos_data" | jq -r '.[] | select(.private == false) | .name' | wc -l)
+    echo "   ✅ $total_repos repositories publics trouvés"
+    
+    echo "📊 Étape 2: Récupération des statistiques de clones..."
+    echo "$repos_data" | jq -r '.[] | select(.private == false) | "\(.name)|\(.stargazers_count)|\(.forks_count)"' | while IFS='|' read repo stars forks; do
+        repo_count=$((repo_count + 1))
+        echo "   🔄 ($repo_count/$total_repos) Traitement de: $repo"
+        
+        clones=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$username/$repo/traffic/clones" | \
+            jq -r '.count // 0')
+        
+        echo "$clones|$repo|$stars|$forks" >> "$temp"
+    done
+    
+    echo "📈 Étape 3: Tri et affichage des résultats..."
+    echo ""
+    echo "┌───────────────────────────────────────────────────────────────────────────────┐"
+    echo "│                      TABLEAU DES STATISTIQUES                                 │"
+    echo "├─────────┬────────────────────────────────────────┬──────────┬─────────────────┤"
+    echo "│  Clone  │            Name                        │  Stars   │      Fork       │"
+    echo "├─────────┼────────────────────────────────────────┼──────────┼─────────────────┤"
+    
+    # Trier par clones et afficher
+    sort -t'|' -k1 -nr "$temp" | while IFS='|' read count repo stars forks; do
+        if [ "$count" -gt 0 ] || [ "$stars" -gt 0 ] || [ "$forks" -gt 0 ]; then
+            printf "│ %7d │ %-28s │ %8d │ %15d │\n" "$count" "$repo" "$stars" "$forks"
+        fi
+    done
+    
+    echo "└─────────┴────────────────────────────────────────┴──────────┴─────────────────┘"
+    echo ""
+    
+    # Calcul des totaux
+    total_clones=$(sort -t'|' -k1 -nr "$temp" | cut -d'|' -f1 | awk '{sum+=$1} END {print sum}')
+    total_stars=$(sort -t'|' -k1 -nr "$temp" | cut -d'|' -f3 | awk '{sum+=$1} END {print sum}')
+    total_forks=$(sort -t'|' -k1 -nr "$temp" | cut -d'|' -f4 | awk '{sum+=$1} END {print sum}')
+    
+    echo "📊 Récapitulatif pour $username:"
+    echo "   • Total clones: $total_clones"
+    echo "   • Total étoiles: $total_stars"
+    echo "   • Total forks: $total_forks"
+    echo "   • Repositories actifs: $(sort -t'|' -k1 -nr "$temp" | wc -l)"
+    
+    rm -f "$temp"
+    
+    echo ""
+    echo "✅ Traitement de $username terminé avec succès!"
+    echo "=========================================================="
+    
+done <<< "$users"
+
+echo ""
+echo "🎉 Tous les utilisateurs ont été traités avec succès!"
+echo "📋 Résumé final:"
+echo "   • Utilisateurs analysés: $(echo "$users" | wc -l)"
+echo "   • Données mises à jour: $(date '+%d/%m/%Y %H:%M:%S')"
